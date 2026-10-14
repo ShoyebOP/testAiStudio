@@ -147,3 +147,11 @@ vite.config.ts.timestamp-*
 
 # Turbo Repo
 .turbo
+
+# Browser auth profiles (account isolation)
+auth/
+
+# Local work staging (cleaned every run) and study-note output:
+tmp/
+notes/
+stage/

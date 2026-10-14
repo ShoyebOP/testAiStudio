@@ -1,0 +1,167 @@
+# AI Studio Study Notes
+
+Turn local files into study-ready notes with Google AI Studio — one command per
+file, isolated per Google account.
+
+For each run the script uploads your file to that account's Google Drive,
+attaches it to a fresh AI Studio chat (model `gemini-3.8-flash`), applies your
+global system instructions, waits for the response, copies it as Markdown, and
+saves it to `./notes/<input-name>.md`. Input files are cleaned up afterwards.
+
+## How it works
+
+One account name drives **both** the browser profile and the Drive remote:
+
+| Concern          | Location                        |
+| ---------------- | ------------------------------- |
+| Browser profile  | `./auth/<account>/`             |
+| Portable rclone config | `./auth/<account>/rclone.conf` (remote named `<account>:`) |
+| Staging / temp   | `./tmp/<account>/` (cleaned every run) |
+| Study notes      | `./notes/<input-name>.md` (global, kept) |
+| System instructions | `./system_instructions.md` (global file) |
+
+Pipeline per run (`bun main.js <account> <local-file> [remote-path]`):
+
+1. **Dedup check** — `rclone lsjson` on the exact Drive dest; byte-identical
+   file already there → skip upload, reuse link.
+2. **Clean + stage** — `./tmp/<account>/` created or emptied, file copied in.
+3. **Upload + public link** — `rclone copyto`, then `rclone link`.
+4. **AI Studio chat** — headed browser (default) with the account's profile:
+   new chat → set system instructions (autosaves on pause) → paste Drive link
+   (attaches as a file chip, e.g. `probe.txt · 12 tokens`) → wait until the
+   chip shows a token count → Run.
+5. **Wait + copy** — done = Stop button gone + Run back + text stable;
+   then *Open options → Copy as markdown* via clipboard.
+6. **Save + clean** — note written, read back, and only if non-empty the
+   staged copy, the **original input file**, and the Drive file are deleted.
+
+Transient Google-side flakes (e.g. the red *"failed to load file"* popup) are
+retried automatically: the browser is closed and the flow restarts from a fresh
+chat, up to 3 attempts.
+
+> ⚠️ **Destructive by design:** on success the original input file is deleted
+> from disk and its Drive copy removed. Keep backups of anything irreplaceable.
+
+## Prerequisites
+
+- [Bun](https://bun.sh) (tested on 1.4.x)
+- [rclone](https://rclone.org) (tested on 1.75.x)
+- A Google account per profile you want to use
+- Linux with a display for headed runs (or `--headless`)
+
+## Install
+
+```bash
+bun install
+```
+
+`cloakbrowser` downloads its own Chromium on first launch
+(cached at `~/.cloakbrowser/`). Do **not** `playwright install chromium`.
+
+## Add an account
+
+Repeat once per Google account. Example account name: `ridoy`.
+
+**1. Browser login** (headed — sign in manually):
+
+```bash
+bun login.js ridoy
+```
+
+A browser opens on Google's sign-in page. Sign in, then press Enter in the
+terminal. Cookies persist in `./auth/ridoy/`.
+
+**2. Drive remote** (portable config, gitignored):
+
+```bash
+rclone --config ./auth/ridoy/rclone.conf config
+```
+
+- `n` new → name it exactly `ridoy` → Storage `drive`
+- `client_id` / `client_secret`: blank
+- scope `1` (full access — needed for upload + public links)
+- `root_folder_id` / `service_account_file`: blank
+- advanced `n` → auto config `y` → authorize the **same** Google account
+- `y` OK → `q` quit
+
+Verify:
+
+```bash
+rclone --config ./auth/ridoy/rclone.conf listremotes   # expect: ridoy:
+rclone --config ./auth/ridoy/rclone.conf lsd ridoy:
+```
+
+> rclone warns its shared Drive `client_id` retires during 2026 — if uploads
+> start failing, create your own client ID per the rclone Drive docs.
+
+**3. System instructions** (one global file for all accounts):
+
+```bash
+cat ./system_instructions.md   # created with a default on first run
+```
+
+Edit it — it is pasted into every chat's *System instructions* card.
+
+## Usage
+
+```bash
+# Headed (default, recommended for login-bound flows)
+bun main.js ridoy /path/to/lecture.pdf
+
+# Custom Drive folder + headless + longer generation timeout
+bun main.js ridoy /path/to/lecture.pdf course/week3 --headless --gen-timeout 45
+```
+
+| Arg / flag | Meaning |
+| ---------- | ------- |
+| `<account>` | Browser profile `./auth/<account>/` **and** rclone remote `<account>:` |
+| `<local-file>` | File to upload. **Deleted after a confirmed note.** |
+| `[remote-path]` | Drive folder (default `uploads/`) |
+| `--headless` | Hide the browser (default is headed) |
+| `--gen-timeout <minutes>` | Max generation wait (default 30; long audio notes need 5–10+) |
+
+Outputs:
+
+- `./notes/<input-name-without-ext>.md` — the study note
+- `./tmp/<account>/upload.json`, `drive_link.txt` — run metadata (staging dir)
+
+## Project layout
+
+```text
+login.js               manual Google sign-in per account (./auth/<name>/)
+main.js                full pipeline: dedup → upload → chat → notes → cleanup
+lib/account.js         one-name account resolution, rclone helpers, stale-browser kill
+lib/aistudio.js        AI Studio selectors/flow (paste, load gate, wait, copy)
+system_instructions.md global system instructions (tracked; edit freely)
+auth/                  gitignored browser profiles + portable rclone.conf per account
+tmp/                   gitignored per-account staging (cleaned every run)
+notes/                 gitignored generated study notes
+```
+
+Key selectors (verified against the live site, see `lib/aistudio.js`):
+
+- Prompt box `textarea[aria-label="Enter a prompt"]`, Run/Stop buttons by label
+- System instructions card `button[data-test-system-instructions-card]` →
+  `textarea[aria-label="System instructions"]`
+- Drive-link paste attaches `ms-prompt-media` (`ms-prompt-file` chip);
+  loaded = chip shows `\d+ tokens`, loading = `Loading...`
+- Latest response: last `ms-chat-turn` → hover → *Open options* →
+  *Copy as markdown* → clipboard
+
+## Troubleshooting
+
+| Symptom | Cause / fix |
+| ------- | ----------- |
+| `profile is already in use` | Another Chromium holds `./auth/<name>/`. Close it; the script auto-kills its own stale PIDs on retry. Never open two runs on the same account. |
+| `Rclone remote "x:" not found` | Remote missing in that account's config — re-run step 2 with the exact account name. |
+| `Rclone config ... not found` | Per-account `rclone.conf` missing — re-run step 2 with `--config ./auth/<name>/rclone.conf`. |
+| Red *failed to load file* popup | Google-side Drive fetch flake — retried automatically (fresh browser, up to 3 attempts). |
+| `Run button stayed disabled` | File still loading (large files take 5+ min) — the script waits for the token-count chip first. |
+| `Timed out waiting for generation` | Raised default is 30 min; pass `--gen-timeout <minutes>` for longer. |
+| Empty-note error | Nothing deleted; fix (`system_instructions.md` empty? generation failed?) and re-run. |
+| Paste lands as plain text | The script pastes via trusted clipboard (`Ctrl+V`) and waits for the `ms-prompt-media` chip, falling back to a synthetic paste event. |
+
+## Privacy
+
+`auth/` (cookies, Drive tokens), `tmp/`, `notes/`, and `stage/` are gitignored.
+Never commit `./auth/*/rclone.conf` — it holds Drive OAuth tokens.
